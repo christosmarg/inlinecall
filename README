@@ -1,0 +1,7 @@
+inlinecall
+==========
+
+inlinecall prints all call sites of an inline function using libdwarf.
+
+It works as-is on FreeBSD and most likely needs some modification to get it to
+work on other platforms.
