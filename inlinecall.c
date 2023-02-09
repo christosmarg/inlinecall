@@ -7,20 +7,16 @@
 #include <string.h>
 #include <unistd.h>
 
-/*
- * TODO
- * make srcfiles global?
- * pack DIE info into a struct?
- */
-
 enum {
 	F_SUBPROGRAM,
 	F_INLINE_COPY,
 };
 
+static char **srcfiles;
+
 static void
 print_info(Dwarf_Debug dbg, Dwarf_Die die_root, Dwarf_Die die,
-    Dwarf_Off dieoff, char **srcfiles, int flag)
+    Dwarf_Off dieoff, int flag)
 {
 	Dwarf_Ranges *ranges, *rp;
 	Dwarf_Attribute attp;
@@ -140,8 +136,7 @@ skip:
 }
 
 static void
-parse_die(Dwarf_Debug dbg, Dwarf_Die die, char **srcfiles, void *data,
-    int level, int flag)
+parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 {
 	static Dwarf_Die die_root;
 	Dwarf_Die die_next;
@@ -217,7 +212,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, char **srcfiles, void *data,
 			goto cont;
 	} else
 		goto cont;
-	print_info(dbg, die_root, die, dieoff, srcfiles, flag);
+	print_info(dbg, die_root, die, dieoff, flag);
 cont:
 	/*
 	 * Inline copies might appear before the declaration, so we need to
@@ -229,17 +224,18 @@ cont:
 		level = 0;
 		flag = F_INLINE_COPY;
 	}
+
 	res = dwarf_child(die, &die_next, &error);
 	if (res == DW_DLV_ERROR)
 		warnx("%s", dwarf_errmsg(error));
 	else if (res == DW_DLV_OK)
-		parse_die(dbg, die_next, srcfiles, data, level + 1, flag);
+		parse_die(dbg, die_next, data, level + 1, flag);
 
 	res = dwarf_siblingof(dbg, die, &die_next, &error);
 	if (res == DW_DLV_ERROR)
 		warnx("%s", dwarf_errmsg(error));
 	else if (res == DW_DLV_OK)
-		parse_die(dbg, die_next, srcfiles, data, level, flag);
+		parse_die(dbg, die_next, data, level, flag);
 
 	/*
 	 * Deallocating on level 0 will attempt to double-free, since die_root
@@ -258,7 +254,6 @@ main(int argc, char *argv[])
 	Dwarf_Signed nfiles;
 	Dwarf_Error error;
 	char *func, *file;
-	char **srcfiles;
 	int fd;
 	int res = DW_DLV_OK;
 
@@ -277,8 +272,8 @@ main(int argc, char *argv[])
 		errx(1, "elf_begin(): %s", elf_errmsg(-1));
 	if (elf_kind(elf) == ELF_K_NONE)
 		errx(1, "not an ELF file: %s", file);
-	res = dwarf_elf_init(elf, DW_DLC_READ, NULL, NULL, &dbg, &error);
-	if (res != DW_DLV_OK)
+	if (dwarf_elf_init(elf, DW_DLC_READ, NULL, NULL, &dbg, &error) !=
+	    DW_DLV_OK)
 		errx(1, "dwarf_elf_init(): %s", dwarf_errmsg(error));
 
 	do {
@@ -289,11 +284,9 @@ main(int argc, char *argv[])
 			    DW_DLV_OK) {
 				srcfiles = NULL;
 				if (dwarf_srcfiles(die, &srcfiles, &nfiles,
-				    &error) != DW_DLV_OK) {
+				    &error) != DW_DLV_OK)
 					warnx("%s", dwarf_errmsg(error));
-				}
-				parse_die(dbg, die, srcfiles, func, 0,
-				    F_SUBPROGRAM);
+				parse_die(dbg, die, func, 0, F_SUBPROGRAM);
 				dwarf_dealloc(dbg, die, DW_DLA_DIE);
 			}
 		}
