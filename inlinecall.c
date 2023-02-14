@@ -1,8 +1,10 @@
+#include <sys/param.h>
 #include <sys/queue.h>
 
 #include <dwarf.h>
 #include <err.h>
 #include <fcntl.h>
+#include <gelf.h>
 #include <libdwarf.h>
 #include <libelf.h>
 #include <stdio.h>
@@ -10,24 +12,43 @@
 #include <string.h>
 #include <unistd.h>
 
-enum {
-	F_SUBPROGRAM,
-	F_INLINE_COPY,
+/* XXX use primitive types instead of dwarf types outside of dwarf functions? */
+
+struct elf_info {
+	Elf			*elf;
+	struct section	{
+		Elf_Scn		*scn;
+		uint64_t	sz;
+		uint64_t	entsize;
+		uint64_t	type;
+		uint32_t	link;
+		uint32_t	info;
+	}			*sl;
+	size_t			shnum;
 };
 
-TAILQ_HEAD(, die_info) diehead = TAILQ_HEAD_INITIALIZER(diehead);
-
 struct die_info {
+	int			naddrs;
 	Dwarf_Off		*addr_lo;
 	Dwarf_Off		*addr_hi;
-	int			naddrs;
 	Dwarf_Unsigned		line;
 	const char		*file;
-	int			flag;
+	enum {
+		F_SUBPROGRAM,
+		F_INLINE_COPY,
+	}			flag;
 	TAILQ_ENTRY(die_info)	next;
 };
 
-static char **srcfiles;
+static void		*emalloc(size_t);
+static void		load_elf_sections(void);
+static void		parse_die(Dwarf_Debug, Dwarf_Die, void *, int, int);
+static const char	*find_caller_func(Dwarf_Off, Dwarf_Off);
+static void		print_info(void);
+
+static char			**srcfiles;
+static struct elf_info		ei;
+static TAILQ_HEAD(, die_info)	diehead = TAILQ_HEAD_INITIALIZER(diehead);
 
 static void *
 emalloc(size_t nb)
@@ -38,6 +59,47 @@ emalloc(size_t nb)
 		err(1, "malloc");
 
 	return (p);
+}
+
+static void
+load_elf_sections(void)
+{
+	Elf_Scn *scn;
+	GElf_Shdr sh;
+	struct section *s;
+	size_t shstrndx, ndx;
+
+	if (!elf_getshnum(ei.elf, &ei.shnum))
+		errx(1, "elf_getshnum(): %s", elf_errmsg(-1));
+	if ((ei.sl = calloc(ei.shnum, sizeof(struct section))) == NULL)
+		err(1, "calloc");
+	if (!elf_getshstrndx(ei.elf, &shstrndx))
+		errx(1, "elf_getshstrndx(): %s", elf_errmsg(-1));
+	if ((scn = elf_getscn(ei.elf, 0)) == NULL)
+		err(1, "elf_getscn(): %s", elf_errmsg(-1));
+	(void)elf_errno();
+
+	do {
+		if (gelf_getshdr(scn, &sh) == NULL) {
+			warnx("gelf_getshdr(): %s", elf_errmsg(-1));
+			(void)elf_errno();
+			continue;
+		}
+		if ((ndx = elf_ndxscn(scn)) == SHN_UNDEF && elf_errno() != 0) {
+			warnx("elf_ndxscn(): %s", elf_errmsg(-1));
+			continue;
+		}
+		if (ndx >= ei.shnum)
+			continue;
+		s = &ei.sl[ndx];
+		s->scn = scn;
+		s->sz = sh.sh_size;
+		s->entsize = sh.sh_entsize;
+		s->type = sh.sh_type;
+		s->link = sh.sh_link;
+	} while ((scn = elf_nextscn(ei.elf, scn)) != NULL);
+	if (elf_errno() != 0)
+		warnx("elf_nextscn(): %s", elf_errmsg(-1));
 }
 
 static void
@@ -103,12 +165,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 		 * definition.
 		 */
 		found = 1;
-	} else if (flag == F_INLINE_COPY) {
-		/*
-		 * XXX I'm not checking against DW_TAG_inlined_subroutine since
-		 * since I'm not sure whether we can have DW_TAG_subprogram
-		 * also work as an inline copy. An example of this is <0x1004>.
-		 */
+	} else if (flag == F_INLINE_COPY && tag == DW_TAG_inlined_subroutine) {
 		res = dwarf_attr(die, DW_AT_abstract_origin, &attp, &error);
 		if (res != DW_DLV_OK) {
 			if (res == DW_DLV_ERROR)
@@ -288,10 +345,61 @@ cont:
 		dwarf_dealloc(dbg, die, DW_DLA_DIE);
 }
 
+static const char *
+find_caller_func(Dwarf_Off addr_lo, Dwarf_Off addr_hi)
+{
+	Elf_Data *d;
+	GElf_Sym sym;
+	struct section *s;
+	const char *name;
+	uint64_t lo, hi;
+	uint32_t stab;
+	int len, i, j;
+
+	for (i = 0; i < ei.shnum; i++) {
+		s = &ei.sl[i];
+		if (s->type != SHT_SYMTAB)
+			continue;
+		if (s->link >= ei.shnum)
+			continue;
+		stab = s->link;
+		(void)elf_errno();
+		if ((d = elf_getdata(s->scn, NULL)) == NULL) {
+			if (elf_errno() != 0)
+				warnx("elf_getdata(): %s", elf_errmsg(-1));
+			continue;
+		}
+		if (d->d_size <= 0)
+			continue;
+		if (s->entsize == 0)
+			continue;
+		else if (s->sz / s->entsize > INT_MAX)
+			continue;
+		len = (int)(s->sz / s->entsize);
+		for (j = 0; j < len; j++) {
+			if (gelf_getsym(d, j, &sym) != &sym) {
+				warnx("gelf_getsym(): %s", elf_errmsg(-1));
+				continue;
+			}
+			if (s->type != STT_FUNC)
+				continue;
+			lo = sym.st_value;
+			hi = sym.st_value + sym.st_size;
+			if (addr_lo < lo || addr_hi > hi)
+				continue;
+			if ((name = elf_strptr(ei.elf, stab, sym.st_name)) != NULL)
+				return (name);
+		}
+	}
+
+	return (NULL);
+}
+
 static void
 print_info(void)
 {
 	struct die_info *di;
+	const char *str;
 	int i;
 
 	/* Clean up as well */
@@ -300,13 +408,15 @@ print_info(void)
 		TAILQ_REMOVE(&diehead, di, next);
 		if (di->flag == F_INLINE_COPY) {
 			for (i = 0; i < di->naddrs; i++) {
-				printf("\t[0x%jx - 0x%jx]",
-				    di->addr_lo[i],
+				printf("\t[0x%jx - 0x%jx]", di->addr_lo[i],
 				    di->addr_hi[i]);
-				if (di->file != NULL) {
-					printf("\t%s:%lu\n",
-					    di->file, di->line);
-				} else
+				if (di->file != NULL)
+					printf("\t%s:%lu", di->file, di->line);
+				str = find_caller_func(di->addr_lo[i],
+				    di->addr_hi[i]);
+				if (str != NULL)
+					printf("\t%s()\n", str);
+				else
 					putchar('\n');
 			}
 			free(di->addr_lo);
@@ -321,7 +431,6 @@ print_info(void)
 int
 main(int argc, char *argv[])
 {
-	Elf *elf;
 	Dwarf_Debug dbg;
 	Dwarf_Die die;
 	Dwarf_Signed nfiles;
@@ -340,13 +449,14 @@ main(int argc, char *argv[])
 		errx(1, "elf_version(): %s", elf_errmsg(-1));
 	if ((fd = open(file, O_RDONLY)) < 0)
 		err(1, "open(%s)", file);
-	if ((elf = elf_begin(fd, ELF_C_READ, NULL)) == NULL)
+	if ((ei.elf = elf_begin(fd, ELF_C_READ, NULL)) == NULL)
 		errx(1, "elf_begin(): %s", elf_errmsg(-1));
-	if (elf_kind(elf) == ELF_K_NONE)
+	if (elf_kind(ei.elf) == ELF_K_NONE)
 		errx(1, "not an ELF file: %s", file);
-	if (dwarf_elf_init(elf, DW_DLC_READ, NULL, NULL, &dbg, &error) !=
+	if (dwarf_elf_init(ei.elf, DW_DLC_READ, NULL, NULL, &dbg, &error) !=
 	    DW_DLV_OK)
 		errx(1, "dwarf_elf_init(): %s", dwarf_errmsg(error));
+	load_elf_sections();
 
 	do {
 		while ((res = dwarf_next_cu_header(dbg, NULL, NULL, NULL, NULL,
@@ -368,8 +478,9 @@ main(int argc, char *argv[])
 			warnx("%s", dwarf_errmsg(error));
 	} while (dwarf_next_types_section(dbg, &error) == DW_DLV_OK);
 
+	free(ei.sl);
+	elf_end(ei.elf);
 	dwarf_finish(dbg, &error);
-	elf_end(elf);
 	close(fd);
 
 	return (0);

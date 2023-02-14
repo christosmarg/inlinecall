@@ -1,4 +1,4 @@
-.Dd February 07, 2023
+.Dd February 15, 2023
 .Dt INLINECALL 1
 .Os
 .Sh NAME
@@ -18,20 +18,15 @@ finds the call sites of
 and outputs the results in the following format:
 .Bd -literal -offset indent
 cu1_func_declaration_file:line
-	[low_bound - high_bound]	inline_copy1_file:line
-	[low_bound - high_bound]	inline_copy2_file:line
+	[low_bound - high_bound]	inline_copy1_file:line	caller_func()
+	[low_bound - high_bound]	inline_copy2_file:line	caller_func()
 	...
 cu2_func_declaration_file:line
 	...
 .Ed
-.Pp
-If
-.Ar file:line
-is missing, that means the inline copy's DIE did not have the
-.Ar DW_TAG_call_file
-tag set.
 .Sh SEE ALSO
 .Xr dwarf 3 ,
-.Xr elf 3
+.Xr elf 3 ,
+.Xr gelf 3
 .Sh AUTHORS
 .An Christos Margiolis Aq Mt christos@FreeBSD.org
