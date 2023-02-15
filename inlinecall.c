@@ -109,7 +109,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 	Dwarf_Die die_next;
 	Dwarf_Ranges *ranges, *rp;
 	Dwarf_Attribute attp;
-	Dwarf_Addr v_addr;
+	Dwarf_Addr base0, v_addr;
 	Dwarf_Off dieoff, cuoff, culen, v_off;
 	Dwarf_Unsigned line, nbytes, v_udata;
 	Dwarf_Signed nranges;
@@ -205,24 +205,29 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
+
+			res = dwarf_attr(die_root, DW_AT_low_pc, &attp,
+			    &error);
+			if (res != DW_DLV_OK) {
+				if (res == DW_DLV_ERROR)
+					warnx("%s", dwarf_errmsg(error));
+				goto cont;
+			}
+			if (dwarf_formaddr(attp, &v_addr, &error) !=
+			    DW_DLV_OK) {
+				warnx("%s", dwarf_errmsg(error));
+				goto cont;
+			}
+			base0 = v_addr;
+
 			naddrs = nranges - 1;
-			addr = emalloc(naddrs * sizeof(uint64_t));
+			addr = emalloc(naddrs * sizeof(struct addr_pair));
 			for (i = 0; i < naddrs; i++) {
 				rp = &ranges[i];
-				res = dwarf_attr(die_root, DW_AT_low_pc, &attp,
-				    &error);
-				if (res != DW_DLV_OK) {
-					if (res == DW_DLV_ERROR)
-						warnx("%s", dwarf_errmsg(error));
-					break;
-				}
-				if (dwarf_formaddr(attp, &v_addr, &error) !=
-				    DW_DLV_OK) {
-					warnx("%s", dwarf_errmsg(error));
-					break;
-				}
-				addr[i].lo = v_addr + rp->dwr_addr1;
-				addr[i].hi = v_addr + rp->dwr_addr2;
+				if (rp->dwr_type == DW_RANGES_ADDRESS_SELECTION)
+					base0 = rp->dwr_addr2;
+				addr[i].lo = rp->dwr_addr1 + base0;
+				addr[i].hi = rp->dwr_addr2 + base0;
 			}
 			dwarf_ranges_dealloc(dbg, ranges, nranges);
 		} else {
@@ -249,7 +254,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 				goto cont;
 			}
 			naddrs = 1;
-			addr = emalloc(sizeof(uint64_t));
+			addr = emalloc(sizeof(struct addr_pair));
 			addr[0].lo = v_addr;		/* lowpc */
 			addr[0].hi = v_addr + v_udata;	/* lowpc + highpc */
 		}
@@ -356,7 +361,7 @@ find_caller_func(struct addr_pair addr)
 
 	for (i = 0; i < ei.shnum; i++) {
 		s = &ei.sl[i];
-		if (s->type != SHT_SYMTAB)
+		if (s->type != SHT_SYMTAB && s->type != SHT_DYNSYM)
 			continue;
 		if (s->link >= ei.shnum)
 			continue;
@@ -379,8 +384,6 @@ find_caller_func(struct addr_pair addr)
 				warnx("gelf_getsym(): %s", elf_errmsg(-1));
 				continue;
 			}
-			if (s->type != STT_FUNC)
-				continue;
 			lo = sym.st_value;
 			hi = sym.st_value + sym.st_size;
 			if (addr.lo < lo || addr.hi > hi)
