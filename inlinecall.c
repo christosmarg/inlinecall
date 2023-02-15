@@ -12,8 +12,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* XXX use primitive types instead of dwarf types outside of dwarf functions? */
-
 struct elf_info {
 	Elf			*elf;
 	struct section	{
@@ -27,28 +25,30 @@ struct elf_info {
 	size_t			shnum;
 };
 
-struct die_info {
+struct entry {
 	int			naddrs;
-	Dwarf_Off		*addr_lo;
-	Dwarf_Off		*addr_hi;
-	Dwarf_Unsigned		line;
+	struct addr_pair {
+		uint64_t	lo;
+		uint64_t	hi;
+	}			*addr;
+	uint64_t		line;
 	const char		*file;
 	enum {
 		F_SUBPROGRAM,
 		F_INLINE_COPY,
 	}			flag;
-	TAILQ_ENTRY(die_info)	next;
+	TAILQ_ENTRY(entry)	next;
 };
 
 static void		*emalloc(size_t);
 static void		load_elf_sections(void);
 static void		parse_die(Dwarf_Debug, Dwarf_Die, void *, int, int);
-static const char	*find_caller_func(Dwarf_Off, Dwarf_Off);
-static void		print_info(void);
+static const char	*find_caller_func(struct addr_pair);
+static void		dump_results(void);
 
 static char			**srcfiles;
 static struct elf_info		ei;
-static TAILQ_HEAD(, die_info)	diehead = TAILQ_HEAD_INITIALIZER(diehead);
+static TAILQ_HEAD(, entry)	head = TAILQ_HEAD_INITIALIZER(head);
 
 static void *
 emalloc(size_t nb)
@@ -109,14 +109,15 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 	Dwarf_Die die_next;
 	Dwarf_Ranges *ranges, *rp;
 	Dwarf_Attribute attp;
-	Dwarf_Addr *addr_lo, *addr_hi, v_addr;
+	Dwarf_Addr v_addr;
 	Dwarf_Off dieoff, cuoff, culen, v_off;
 	Dwarf_Unsigned line, nbytes, v_udata;
 	Dwarf_Signed nranges;
 	Dwarf_Half attr, tag;
 	Dwarf_Bool v_flag;
 	Dwarf_Error error;
-	struct die_info *di;
+	struct entry *e;
+	struct addr_pair *addr;
 	const char *str;
 	char *v_str;
 	char *file = NULL;
@@ -205,8 +206,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 				goto cont;
 			}
 			naddrs = nranges - 1;
-			addr_lo = emalloc(naddrs * sizeof(Dwarf_Off));
-			addr_hi = emalloc(naddrs * sizeof(Dwarf_Off));
+			addr = emalloc(naddrs * sizeof(uint64_t));
 			for (i = 0; i < naddrs; i++) {
 				rp = &ranges[i];
 				res = dwarf_attr(die_root, DW_AT_low_pc, &attp,
@@ -221,8 +221,8 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 					warnx("%s", dwarf_errmsg(error));
 					break;
 				}
-				addr_lo[i] = v_addr + rp->dwr_addr1;
-				addr_hi[i] = v_addr + rp->dwr_addr2;
+				addr[i].lo = v_addr + rp->dwr_addr1;
+				addr[i].hi = v_addr + rp->dwr_addr2;
 			}
 			dwarf_ranges_dealloc(dbg, ranges, nranges);
 		} else {
@@ -249,10 +249,9 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 				goto cont;
 			}
 			naddrs = 1;
-			addr_lo = emalloc(sizeof(Dwarf_Off));
-			addr_hi = emalloc(sizeof(Dwarf_Off));
-			addr_lo[0] = v_addr;		/* lowpc */
-			addr_hi[0] = v_addr + v_udata;	/* lowpc + highpc */
+			addr = emalloc(sizeof(uint64_t));
+			addr[0].lo = v_addr;		/* lowpc */
+			addr[0].hi = v_addr + v_udata;	/* lowpc + highpc */
 		}
 	} else
 		goto cont;
@@ -283,19 +282,18 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 		goto cont;
 	}
 skip:
-	di = emalloc(sizeof(struct die_info));
-	di->flag = flag;
+	e = emalloc(sizeof(struct entry));
+	e->flag = flag;
 	if (file != NULL) {
-		di->file = file;
-		di->line = line;
+		e->file = file;
+		e->line = line;
 	} else
-		di->file = NULL;
-	if (di->flag == F_INLINE_COPY) {
-		di->naddrs = naddrs;
-		di->addr_lo = addr_lo;
-		di->addr_hi = addr_hi;
+		e->file = NULL;
+	if (e->flag == F_INLINE_COPY) {
+		e->naddrs = naddrs;
+		e->addr = addr;
 	}
-	TAILQ_INSERT_TAIL(&diehead, di, next);
+	TAILQ_INSERT_TAIL(&head, e, next);
 cont:
 	/*
 	 * Inline copies might appear before the declaration, so we need to
@@ -346,7 +344,7 @@ cont:
 }
 
 static const char *
-find_caller_func(Dwarf_Off addr_lo, Dwarf_Off addr_hi)
+find_caller_func(struct addr_pair addr)
 {
 	Elf_Data *d;
 	GElf_Sym sym;
@@ -385,7 +383,7 @@ find_caller_func(Dwarf_Off addr_lo, Dwarf_Off addr_hi)
 				continue;
 			lo = sym.st_value;
 			hi = sym.st_value + sym.st_size;
-			if (addr_lo < lo || addr_hi > hi)
+			if (addr.lo < lo || addr.hi > hi)
 				continue;
 			if ((name = elf_strptr(ei.elf, stab, sym.st_name)) != NULL)
 				return (name);
@@ -396,35 +394,33 @@ find_caller_func(Dwarf_Off addr_lo, Dwarf_Off addr_hi)
 }
 
 static void
-print_info(void)
+dump_results(void)
 {
-	struct die_info *di;
+	struct entry *e;
 	const char *str;
 	int i;
 
 	/* Clean up as well */
-	while (!TAILQ_EMPTY(&diehead)) {
-		di = TAILQ_FIRST(&diehead);
-		TAILQ_REMOVE(&diehead, di, next);
-		if (di->flag == F_INLINE_COPY) {
-			for (i = 0; i < di->naddrs; i++) {
-				printf("\t[0x%jx - 0x%jx]", di->addr_lo[i],
-				    di->addr_hi[i]);
-				if (di->file != NULL)
-					printf("\t%s:%lu", di->file, di->line);
-				str = find_caller_func(di->addr_lo[i],
-				    di->addr_hi[i]);
+	while (!TAILQ_EMPTY(&head)) {
+		e = TAILQ_FIRST(&head);
+		TAILQ_REMOVE(&head, e, next);
+		if (e->flag == F_INLINE_COPY) {
+			for (i = 0; i < e->naddrs; i++) {
+				printf("\t[0x%jx - 0x%jx]", e->addr[i].lo,
+				    e->addr[i].hi);
+				if (e->file != NULL)
+					printf("\t%s:%lu", e->file, e->line);
+				str = find_caller_func(e->addr[i]);
 				if (str != NULL)
 					printf("\t%s()\n", str);
 				else
 					putchar('\n');
 			}
-			free(di->addr_lo);
-			free(di->addr_hi);
-		} else if (di->flag == F_SUBPROGRAM) {
-			printf("%s:%lu\n", di->file, di->line);
+			free(e->addr);
+		} else if (e->flag == F_SUBPROGRAM) {
+			printf("%s:%lu\n", e->file, e->line);
 		}
-		free(di);
+		free(e);
 	}
 }
 
@@ -462,7 +458,7 @@ main(int argc, char *argv[])
 		while ((res = dwarf_next_cu_header(dbg, NULL, NULL, NULL, NULL,
 		    NULL, &error)) == DW_DLV_OK) {
 			die = NULL;
-			TAILQ_INIT(&diehead);
+			TAILQ_INIT(&head);
 			while (dwarf_siblingof(dbg, die, &die, &error) ==
 			    DW_DLV_OK) {
 				srcfiles = NULL;
@@ -472,7 +468,7 @@ main(int argc, char *argv[])
 				parse_die(dbg, die, func, 0, F_SUBPROGRAM);
 			}
 			dwarf_dealloc(dbg, die, DW_DLA_DIE);
-			print_info();
+			dump_results();
 		}
 		if (res == DW_DLV_ERROR)
 			warnx("%s", dwarf_errmsg(error));
