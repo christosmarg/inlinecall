@@ -41,12 +41,13 @@ struct entry {
 };
 
 static void		*emalloc(size_t);
-static void		load_elf_sections(void);
-static void		parse_die(Dwarf_Debug, Dwarf_Die, void *, int, int);
+static void		parse_die(Dwarf_Debug, Dwarf_Die, int, int);
 static const char	*find_caller_func(struct addr_pair);
 static void		dump_results(void);
 
 static char			**srcfiles;
+static char			*func;
+static Dwarf_Off		g_dieoff;
 static struct elf_info		ei;
 static TAILQ_HEAD(, entry)	head = TAILQ_HEAD_INITIALIZER(head);
 
@@ -62,48 +63,7 @@ emalloc(size_t nb)
 }
 
 static void
-load_elf_sections(void)
-{
-	Elf_Scn *scn;
-	GElf_Shdr sh;
-	struct section *s;
-	size_t shstrndx, ndx;
-
-	if (!elf_getshnum(ei.elf, &ei.shnum))
-		errx(1, "elf_getshnum(): %s", elf_errmsg(-1));
-	if ((ei.sl = calloc(ei.shnum, sizeof(struct section))) == NULL)
-		err(1, "calloc");
-	if (!elf_getshstrndx(ei.elf, &shstrndx))
-		errx(1, "elf_getshstrndx(): %s", elf_errmsg(-1));
-	if ((scn = elf_getscn(ei.elf, 0)) == NULL)
-		err(1, "elf_getscn(): %s", elf_errmsg(-1));
-	(void)elf_errno();
-
-	do {
-		if (gelf_getshdr(scn, &sh) == NULL) {
-			warnx("gelf_getshdr(): %s", elf_errmsg(-1));
-			(void)elf_errno();
-			continue;
-		}
-		if ((ndx = elf_ndxscn(scn)) == SHN_UNDEF && elf_errno() != 0) {
-			warnx("elf_ndxscn(): %s", elf_errmsg(-1));
-			continue;
-		}
-		if (ndx >= ei.shnum)
-			continue;
-		s = &ei.sl[ndx];
-		s->scn = scn;
-		s->sz = sh.sh_size;
-		s->entsize = sh.sh_entsize;
-		s->type = sh.sh_type;
-		s->link = sh.sh_link;
-	} while ((scn = elf_nextscn(ei.elf, scn)) != NULL);
-	if (elf_errno() != 0)
-		warnx("elf_nextscn(): %s", elf_errmsg(-1));
-}
-
-static void
-parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
+parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 {
 	static Dwarf_Die die_root;
 	Dwarf_Die die_next;
@@ -159,7 +119,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 			warnx("%s", dwarf_errmsg(error));
 			goto cont;
 		}
-		if (strcmp(v_str, (char *)data) != 0)
+		if (strcmp(v_str, func) != 0)
 			goto cont;
 		/*
 		 * The function name we're searching for has an inline
@@ -179,7 +139,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, void *data, int level, int flag)
 		}
 		v_off += cuoff;
 		/* Doesn't point to the definition's DIE offset. */
-		if (v_off != (Dwarf_Off)data)
+		if (v_off != g_dieoff)
 			goto cont;
 
 		if (dwarf_hasattr(die, DW_AT_ranges, &v_flag, &error) !=
@@ -306,15 +266,15 @@ cont:
 	 *
 	 * The rationale for choosing to re-parse the CU instead of using a
 	 * hash table of DIEs is that, because we re-parse only when an inline
-	 * definition of the function we want is found. This means that,
-	 * statistically, we won't have to re-parse many times at all
-	 * considering that only a handful of CUs will define the function,
-	 * whereas if we have used a hash table, we would first need to parse
-	 * the whole CU at once and store all DW_TAG_inlined_subroutine DIEs
-	 * (so that we can match them afterwards). In this case, we always have
-	 * to "parse" twice -- first the CU, then the DIE table -- and also,
-	 * the program would use much more memory since we would have allocated
-	 * DIEs, which most of them would never be used.
+	 * definition of the function we want is found, statistically, we won't
+	 * have to re-parse many times at all considering that only a handful
+	 * of CUs will define the same function, whereas if we have used a hash
+	 * table, we would first need to parse the whole CU at once and store
+	 * all DW_TAG_inlined_subroutine DIEs (so that we can match them
+	 * afterwards). In this case, we always have to "parse" twice -- first
+	 * the CU, then the DIE table -- and also, the program would use much
+	 * more memory since we would have allocated DIEs, which most of them
+	 * would never be used.
 	 */
 	if (found) {
 		die = die_root;
@@ -324,7 +284,7 @@ cont:
 		 * to determine if the inline copy's DW_AT_abstract_origin
 		 * points to it.
 		 */
-		data = (void *)dieoff;
+		g_dieoff = dieoff;
 		flag = F_INLINE_COPY;
 	}
 
@@ -332,13 +292,13 @@ cont:
 	if (res == DW_DLV_ERROR)
 		warnx("%s", dwarf_errmsg(error));
 	else if (res == DW_DLV_OK)
-		parse_die(dbg, die_next, data, level + 1, flag);
+		parse_die(dbg, die_next, level + 1, flag);
 
 	res = dwarf_siblingof(dbg, die, &die_next, &error);
 	if (res == DW_DLV_ERROR)
 		warnx("%s", dwarf_errmsg(error));
 	else if (res == DW_DLV_OK)
-		parse_die(dbg, die_next, data, level, flag);
+		parse_die(dbg, die_next, level, flag);
 
 	/*
 	 * Deallocating on level 0 will attempt to double-free, since die_root
@@ -430,11 +390,15 @@ dump_results(void)
 int
 main(int argc, char *argv[])
 {
+	Elf_Scn *scn;
+	GElf_Shdr sh;
 	Dwarf_Debug dbg;
 	Dwarf_Die die;
 	Dwarf_Signed nfiles;
 	Dwarf_Error error;
-	char *func, *file;
+	struct section *s;
+	char *file;
+	size_t shstrndx, ndx;
 	int fd, res = DW_DLV_OK;
 
 	if (argc < 3) {
@@ -455,7 +419,39 @@ main(int argc, char *argv[])
 	if (dwarf_elf_init(ei.elf, DW_DLC_READ, NULL, NULL, &dbg, &error) !=
 	    DW_DLV_OK)
 		errx(1, "dwarf_elf_init(): %s", dwarf_errmsg(error));
-	load_elf_sections();
+
+	/* Load ELF sections */
+	if (!elf_getshnum(ei.elf, &ei.shnum))
+		errx(1, "elf_getshnum(): %s", elf_errmsg(-1));
+	if ((ei.sl = calloc(ei.shnum, sizeof(struct section))) == NULL)
+		err(1, "calloc");
+	if (!elf_getshstrndx(ei.elf, &shstrndx))
+		errx(1, "elf_getshstrndx(): %s", elf_errmsg(-1));
+	if ((scn = elf_getscn(ei.elf, 0)) == NULL)
+		err(1, "elf_getscn(): %s", elf_errmsg(-1));
+	(void)elf_errno();
+
+	do {
+		if (gelf_getshdr(scn, &sh) == NULL) {
+			warnx("gelf_getshdr(): %s", elf_errmsg(-1));
+			(void)elf_errno();
+			continue;
+		}
+		if ((ndx = elf_ndxscn(scn)) == SHN_UNDEF && elf_errno() != 0) {
+			warnx("elf_ndxscn(): %s", elf_errmsg(-1));
+			continue;
+		}
+		if (ndx >= ei.shnum)
+			continue;
+		s = &ei.sl[ndx];
+		s->scn = scn;
+		s->sz = sh.sh_size;
+		s->entsize = sh.sh_entsize;
+		s->type = sh.sh_type;
+		s->link = sh.sh_link;
+	} while ((scn = elf_nextscn(ei.elf, scn)) != NULL);
+	if (elf_errno() != 0)
+		warnx("elf_nextscn(): %s", elf_errmsg(-1));
 
 	do {
 		while ((res = dwarf_next_cu_header(dbg, NULL, NULL, NULL, NULL,
@@ -468,7 +464,7 @@ main(int argc, char *argv[])
 				if (dwarf_srcfiles(die, &srcfiles, &nfiles,
 				    &error) != DW_DLV_OK)
 					warnx("%s", dwarf_errmsg(error));
-				parse_die(dbg, die, func, 0, F_SUBPROGRAM);
+				parse_die(dbg, die, 0, F_SUBPROGRAM);
 			}
 			dwarf_dealloc(dbg, die, DW_DLA_DIE);
 			dump_results();
