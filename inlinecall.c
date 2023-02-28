@@ -16,11 +16,7 @@ struct elf_info {
 	Elf			*elf;
 	struct section	{
 		Elf_Scn		*scn;
-		uint64_t	sz;
-		uint64_t	entsize;
-		uint64_t	type;
-		uint32_t	link;
-		uint32_t	info;
+		GElf_Shdr	sh;
 	}			*sl;
 	size_t			shnum;
 };
@@ -69,7 +65,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 	Dwarf_Die die_next;
 	Dwarf_Ranges *ranges, *rp;
 	Dwarf_Attribute attp;
-	Dwarf_Addr base0, v_addr;
+	Dwarf_Addr base0, lowpc, highpc;
 	Dwarf_Off dieoff, cuoff, culen, v_off;
 	Dwarf_Unsigned line, nbytes, v_udata;
 	Dwarf_Signed nranges;
@@ -161,12 +157,12 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 				goto cont;
 			}
 
-			res = dwarf_lowpc(die_root, &v_addr, &error);
+			res = dwarf_lowpc(die_root, &lowpc, &error);
 			if (res != DW_DLV_OK) {
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
-			base0 = v_addr;
+			base0 = lowpc;
 
 			naddrs = nranges - 1;
 			addr = emalloc(naddrs * sizeof(struct addr_pair));
@@ -180,20 +176,20 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 			dwarf_ranges_dealloc(dbg, ranges, nranges);
 		} else {
 			/* DIE has high/low PC boundaries */
-			res = dwarf_lowpc(die_root, &v_addr, &error);
+			res = dwarf_lowpc(die, &lowpc, &error);
 			if (res != DW_DLV_OK) {
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
-			res = dwarf_highpc(die_root, &v_udata, &error);
+			res = dwarf_highpc(die, &highpc, &error);
 			if (res != DW_DLV_OK) {
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
 			naddrs = 1;
 			addr = emalloc(sizeof(struct addr_pair));
-			addr[0].lo = v_addr;		/* lowpc */
-			addr[0].hi = v_addr + v_udata;	/* lowpc + highpc */
+			addr[0].lo = lowpc;
+			addr[0].hi = lowpc + highpc;
 		}
 	} else
 		goto cont;
@@ -298,11 +294,11 @@ find_caller_func(struct addr_pair addr)
 
 	for (i = 0; i < ei.shnum; i++) {
 		s = &ei.sl[i];
-		if (s->type != SHT_SYMTAB && s->type != SHT_DYNSYM)
+		if (s->sh.sh_type != SHT_SYMTAB && s->sh.sh_type != SHT_DYNSYM)
 			continue;
-		if (s->link >= ei.shnum)
+		if (s->sh.sh_link >= ei.shnum)
 			continue;
-		stab = s->link;
+		stab = s->sh.sh_link;
 		(void)elf_errno();
 		if ((d = elf_getdata(s->scn, NULL)) == NULL) {
 			if (elf_errno() != 0)
@@ -311,11 +307,11 @@ find_caller_func(struct addr_pair addr)
 		}
 		if (d->d_size <= 0)
 			continue;
-		if (s->entsize == 0)
+		if (s->sh.sh_entsize == 0)
 			continue;
-		else if (s->sz / s->entsize > INT_MAX)
+		else if (s->sh.sh_size / s->sh.sh_entsize > INT_MAX)
 			continue;
-		len = (int)(s->sz / s->entsize);
+		len = (int)(s->sh.sh_size / s->sh.sh_entsize);
 		for (j = 0; j < len; j++) {
 			if (gelf_getsym(d, j, &sym) != &sym) {
 				warnx("gelf_getsym(): %s", elf_errmsg(-1));
@@ -422,10 +418,7 @@ main(int argc, char *argv[])
 			continue;
 		s = &ei.sl[ndx];
 		s->scn = scn;
-		s->sz = sh.sh_size;
-		s->entsize = sh.sh_entsize;
-		s->type = sh.sh_type;
-		s->link = sh.sh_link;
+		s->sh = sh;
 	} while ((scn = elf_nextscn(ei.elf, scn)) != NULL);
 	if (elf_errno() != 0)
 		warnx("elf_nextscn(): %s", elf_errmsg(-1));
