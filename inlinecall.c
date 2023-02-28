@@ -109,13 +109,8 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 		}
 		if (!v_flag)
 			goto cont;
-		res = dwarf_attr(die, DW_AT_name, &attp, &error);
+		res = dwarf_diename(die, &v_str, &error);
 		if (res != DW_DLV_OK) {
-			if (res == DW_DLV_ERROR)
-				warnx("%s", dwarf_errmsg(error));
-			goto cont;
-		}
-		if (dwarf_formstring(attp, &v_str, &error) != DW_DLV_OK) {
 			warnx("%s", dwarf_errmsg(error));
 			goto cont;
 		}
@@ -166,15 +161,8 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 				goto cont;
 			}
 
-			res = dwarf_attr(die_root, DW_AT_low_pc, &attp,
-			    &error);
+			res = dwarf_lowpc(die_root, &v_addr, &error);
 			if (res != DW_DLV_OK) {
-				if (res == DW_DLV_ERROR)
-					warnx("%s", dwarf_errmsg(error));
-				goto cont;
-			}
-			if (dwarf_formaddr(attp, &v_addr, &error) !=
-			    DW_DLV_OK) {
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
@@ -192,24 +180,13 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 			dwarf_ranges_dealloc(dbg, ranges, nranges);
 		} else {
 			/* DIE has high/low PC boundaries */
-			res = dwarf_attr(die, DW_AT_low_pc, &attp, &error);
+			res = dwarf_lowpc(die_root, &v_addr, &error);
 			if (res != DW_DLV_OK) {
-				if (res == DW_DLV_ERROR)
-					warnx("%s", dwarf_errmsg(error));
-				goto cont;
-			}
-			if (dwarf_formaddr(attp, &v_addr, &error) != DW_DLV_OK) {
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
-			res = dwarf_attr(die, DW_AT_high_pc, &attp, &error);
+			res = dwarf_highpc(die_root, &v_udata, &error);
 			if (res != DW_DLV_OK) {
-				if (res == DW_DLV_ERROR)
-					warnx("%s", dwarf_errmsg(error));
-				goto cont;
-			}
-			if (dwarf_formudata(attp, &v_udata, &error) !=
-			    DW_DLV_OK) {
 				warnx("%s", dwarf_errmsg(error));
 				goto cont;
 			}
