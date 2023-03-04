@@ -423,25 +423,22 @@ main(int argc, char *argv[])
 	if (elf_errno() != 0)
 		warnx("elf_nextscn(): %s", elf_errmsg(-1));
 
-	do {
-		while ((res = dwarf_next_cu_header(dbg, NULL, NULL, NULL, NULL,
-		    NULL, &error)) == DW_DLV_OK) {
-			die = NULL;
-			TAILQ_INIT(&head);
-			while (dwarf_siblingof(dbg, die, &die, &error) ==
-			    DW_DLV_OK) {
-				srcfiles = NULL;
-				if (dwarf_srcfiles(die, &srcfiles, &nfiles,
-				    &error) != DW_DLV_OK)
-					warnx("%s", dwarf_errmsg(error));
-				parse_die(dbg, die, 0, F_SUBPROGRAM);
-			}
-			dwarf_dealloc(dbg, die, DW_DLA_DIE);
-			dump_results();
+	while ((res = dwarf_next_cu_header(dbg, NULL, NULL, NULL, NULL, NULL,
+	    &error)) == DW_DLV_OK) {
+		die = NULL;
+		TAILQ_INIT(&head);
+		while (dwarf_siblingof(dbg, die, &die, &error) == DW_DLV_OK) {
+			srcfiles = NULL;
+			if (dwarf_srcfiles(die, &srcfiles, &nfiles, &error) !=
+			    DW_DLV_OK)
+				warnx("%s", dwarf_errmsg(error));
+			parse_die(dbg, die, 0, F_SUBPROGRAM);
 		}
-		if (res == DW_DLV_ERROR)
-			warnx("%s", dwarf_errmsg(error));
-	} while (dwarf_next_types_section(dbg, &error) == DW_DLV_OK);
+		dwarf_dealloc(dbg, die, DW_DLA_DIE);
+		dump_results();
+	}
+	if (res == DW_DLV_ERROR)
+		warnx("%s", dwarf_errmsg(error));
 
 	free(ei.sl);
 	elf_end(ei.elf);
