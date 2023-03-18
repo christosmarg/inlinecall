@@ -299,6 +299,7 @@ find_caller_func(struct addr_pair addr)
 		if (s->sh.sh_link >= ei.shnum)
 			continue;
 		stab = s->sh.sh_link;
+		len = (int)(s->sh.sh_size / s->sh.sh_entsize);
 		(void)elf_errno();
 		if ((d = elf_getdata(s->scn, NULL)) == NULL) {
 			if (elf_errno() != 0)
@@ -309,9 +310,8 @@ find_caller_func(struct addr_pair addr)
 			continue;
 		if (s->sh.sh_entsize == 0)
 			continue;
-		else if (s->sh.sh_size / s->sh.sh_entsize > INT_MAX)
+		else if (len > INT_MAX)
 			continue;
-		len = (int)(s->sh.sh_size / s->sh.sh_entsize);
 		for (j = 0; j < len; j++) {
 			if (gelf_getsym(d, j, &sym) != &sym) {
 				warnx("gelf_getsym(): %s", elf_errmsg(-1));
