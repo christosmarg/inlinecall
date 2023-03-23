@@ -317,6 +317,8 @@ find_caller_func(struct addr_pair addr)
 				warnx("gelf_getsym(): %s", elf_errmsg(-1));
 				continue;
 			}
+			if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
+				continue;
 			lo = sym.st_value;
 			hi = sym.st_value + sym.st_size;
 			if (addr.lo < lo || addr.hi > hi)
