@@ -117,7 +117,7 @@ parse_die(Dwarf_Debug dbg, Dwarf_Die die, int level, int flag)
 		 * definition.
 		 */
 		found = 1;
-	} else if (flag == F_INLINE_COPY && tag == DW_TAG_inlined_subroutine) {
+	} else if (flag == F_INLINE_COPY) {
 		res = dwarf_attr(die, DW_AT_abstract_origin, &attp, &error);
 		if (res != DW_DLV_OK) {
 			if (res == DW_DLV_ERROR)
